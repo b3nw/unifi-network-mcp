@@ -13,6 +13,24 @@ import os
 import sys  # Removed uvicorn import
 import traceback
 
+# Patch StreamHandler.emit to handle I/O errors when stdio transport closes stdout.
+# This prevents "--- Logging error ---" tracebacks when running HTTP SSE alongside stdio.
+_original_stream_handler_emit = logging.StreamHandler.emit
+
+
+def _tolerant_stream_handler_emit(self, record):
+    """StreamHandler.emit that skips logging if stream is closed."""
+    try:
+        stream = getattr(self, "stream", None)
+        if stream is None or (hasattr(stream, "closed") and stream.closed):
+            return
+        _original_stream_handler_emit(self, record)
+    except Exception:
+        pass
+
+
+logging.StreamHandler.emit = _tolerant_stream_handler_emit
+
 from src.bootstrap import (
     UNIFI_TOOL_REGISTRATION_MODE,
     logger,
@@ -331,9 +349,12 @@ async def main_async():
 
     tasks = [run_stdio()]
     if http_enabled:
+        # Note: StreamHandler.emit is patched at module load time (top of file)
+        # to handle I/O errors when stdio transport closes stdout.
 
         async def run_http():
             try:
+                # Log to our logger (which may still work if it has file handlers)
                 logger.info(f"Starting FastMCP HTTP SSE server on {host}:{port} ...")
                 # MCP SDK >= 1.10 (pinned to 1.13.1): configure host/port via settings
                 server.settings.host = host
