@@ -13,6 +13,27 @@ import os
 import sys  # Removed uvicorn import
 import traceback
 
+# Patch StreamHandler.emit to handle I/O errors when stdio transport closes streams.
+# This prevents "--- Logging error ---" tracebacks when running HTTP SSE alongside stdio.
+# Note: logging.getLogger("uvicorn.access").disabled = True does NOT work because
+# the handler's emit() is called directly, bypassing the logger's disabled check.
+_original_stream_handler_emit = logging.StreamHandler.emit
+
+
+def _tolerant_stream_handler_emit(self, record):
+    """StreamHandler.emit that skips logging if stream is closed."""
+    try:
+        stream = getattr(self, "stream", None)
+        if stream is None or (hasattr(stream, "closed") and stream.closed):
+            return
+        _original_stream_handler_emit(self, record)
+    except (OSError, ValueError):
+        # Silently ignore I/O errors on closed streams
+        pass
+
+
+logging.StreamHandler.emit = _tolerant_stream_handler_emit
+
 from src.bootstrap import (
     UNIFI_TOOL_REGISTRATION_MODE,
     logger,
@@ -337,11 +358,6 @@ async def main_async():
                 logger.info(f"Starting FastMCP HTTP SSE server on {host}:{port} ...")
                 server.settings.host = host
                 server.settings.port = port
-
-                # Disable uvicorn access logging to prevent stdout conflicts
-                # when running alongside stdio transport
-                logging.getLogger("uvicorn.access").disabled = True
-
                 await server.run_sse_async()
                 logger.info("HTTP SSE started via run_sse_async() using server.settings host/port.")
             except Exception as http_e:
